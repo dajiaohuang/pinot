@@ -600,13 +600,14 @@ public class QueryEnvironment {
     List<RelOptRule> pruneRules =
         filterRuleList(ruleSet.rulesFor(Phase.PRUNE), skipRuleSet, useRuleSet, defaultDisabledRuleSet);
 
-    // Supplies the data type argument before AggregateCaseToFilter, which rewrites only one-argument calls: its
-    // ARRAY_AGG(expression) FILTER (WHERE condition) form of ARRAY_AGG(CASE WHEN ...) fails at runtime.
-    hepProgramBuilder.addRuleInstance(PinotAggregateTypeArgumentRewriteRule.INSTANCE);
-
     // Run the Calcite CORE rules using 1 HepInstruction per rule. We use 1 HepInstruction per rule for simplicity:
     // the rules used here can rest assured that they are the only ones evaluated in a dedicated graph-traversal.
     for (RelOptRule relOptRule : basicRules) {
+      // Supplies the data type argument before AggregateCaseToFilter, which rewrites only one-argument calls: its
+      // ARRAY_AGG(expression) FILTER (WHERE condition) form of ARRAY_AGG(CASE WHEN ...) fails at runtime.
+      if (relOptRule.toString().equals(CommonConstants.Broker.PlannerRuleNames.AGGREGATE_CASE_TO_FILTER)) {
+        hepProgramBuilder.addRuleInstance(PinotAggregateTypeArgumentRewriteRule.INSTANCE);
+      }
       hepProgramBuilder.addRuleInstance(relOptRule);
     }
     // Required to plan FIRST_WITH_TIME, LAST_WITH_TIME and ARRAY_AGG without a data type, so the rule options do not

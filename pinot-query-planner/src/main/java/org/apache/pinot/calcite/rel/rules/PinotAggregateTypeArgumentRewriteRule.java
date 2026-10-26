@@ -39,6 +39,7 @@ import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.tools.RelBuilderFactory;
+import org.apache.pinot.query.planner.logical.RelToPlanNodeConverter;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
 
 
@@ -46,6 +47,9 @@ import org.apache.pinot.segment.spi.AggregationFunctionType;
 /// - FIRST_WITH_TIME(dataColumn, timeColumn) -> FIRST_WITH_TIME(dataColumn, timeColumn, 'dataType')
 /// - LAST_WITH_TIME(dataColumn, timeColumn) -> LAST_WITH_TIME(dataColumn, timeColumn, 'dataType')
 /// - ARRAY_AGG(expression[, isDistinct]) -> ARRAY_AGG(expression, 'dataType'[, isDistinct])
+///
+/// The DISTINCT keyword of ARRAY_AGG becomes its isDistinct argument, because the aggregate exchange drops the DISTINCT
+/// flag.
 ///
 /// The result type of the call is unchanged. The literal is projected directly beneath the aggregate, appended to the
 /// existing project when there is one, because [PinotAggregateExchangeNodeInsertRule] and `AggregatePushdownRule`
@@ -65,10 +69,11 @@ public class PinotAggregateTypeArgumentRewriteRule extends RelOptRule {
 
   @Override
   public boolean matches(RelOptRuleCall call) {
-    // Requiring a call without its data type is also what makes the rule terminate.
+    // Requiring a call without its data type or with the DISTINCT flag is also what makes the rule terminate.
     Aggregate aggRel = call.rel(0);
     RelNode input = aggRel.getInput();
-    return aggRel.getAggCallList().stream().anyMatch(aggCall -> getDataTypeArgument(aggCall, input) != null);
+    return aggRel.getAggCallList().stream()
+        .anyMatch(aggCall -> getDataTypeArgument(aggCall, input) != null || isDistinctArrayAgg(aggCall));
   }
 
   @Override
@@ -103,29 +108,35 @@ public class PinotAggregateTypeArgumentRewriteRule extends RelOptRule {
     int isDistinctLiteralIndex = -1;
     for (AggregateCall aggCall : orgAggCalls) {
       String dataType = getDataTypeArgument(aggCall, input);
-      if (dataType == null) {
+      boolean isDistinctArrayAgg = isDistinctArrayAgg(aggCall);
+      if (dataType == null && !isDistinctArrayAgg) {
         aggCalls.add(aggCall);
         continue;
       }
-      int literalIndex = literalIndexByDataType.computeIfAbsent(dataType, type -> {
-        projects.add(rexBuilder.makeLiteral(type));
-        return projects.size() - 1;
-      });
       List<Integer> argList = new ArrayList<>(aggCall.getArgList());
       AggregateCall newAggCall = aggCall;
-      if (isArrayAgg(aggCall)) {
-        argList.add(1, literalIndex);
-        // The aggregate exchange drops the DISTINCT flag, so ARRAY_AGG(DISTINCT expression) passes it as isDistinct
-        if (aggCall.isDistinct() && argList.size() == 2) {
-          if (isDistinctLiteralIndex < 0) {
-            projects.add(rexBuilder.makeLiteral(true));
-            isDistinctLiteralIndex = projects.size() - 1;
-          }
-          argList.add(isDistinctLiteralIndex);
-          newAggCall = aggCall.withDistinct(false);
+      if (dataType != null) {
+        int literalIndex = literalIndexByDataType.computeIfAbsent(dataType, type -> {
+          projects.add(rexBuilder.makeLiteral(type));
+          return projects.size() - 1;
+        });
+        if (isArrayAgg(aggCall)) {
+          argList.add(1, literalIndex);
+        } else {
+          argList.add(literalIndex);
         }
-      } else {
-        argList.add(literalIndex);
+      }
+      if (isDistinctArrayAgg) {
+        if (isDistinctLiteralIndex < 0) {
+          projects.add(rexBuilder.makeLiteral(true));
+          isDistinctLiteralIndex = projects.size() - 1;
+        }
+        if (argList.size() == 3) {
+          argList.set(2, isDistinctLiteralIndex);
+        } else {
+          argList.add(isDistinctLiteralIndex);
+        }
+        newAggCall = aggCall.withDistinct(false);
       }
       // Keeps the original result type, so the rewrite does not change the result schema.
       aggCalls.add(newAggCall.withArgList(argList));
@@ -182,15 +193,9 @@ public class PinotAggregateTypeArgumentRewriteRule extends RelOptRule {
       case DOUBLE:
         return "DOUBLE";
       case DECIMAL:
-        if (name.equals(AggregationFunctionType.ARRAYAGG.name())) {
-          // The planner types an array of DECIMAL as INT_ARRAY or LONG_ARRAY for scale 0 and precision up to 38, and as
-          // DOUBLE_ARRAY otherwise, see RelToPlanNodeConverter.resolveDecimal
-          if (dataType.getScale() == 0 && dataType.getPrecision() <= 38) {
-            return dataType.getPrecision() <= 10 ? "INT" : "LONG";
-          }
-          return "DOUBLE";
-        }
-        return "BIG_DECIMAL";
+        // ARRAY_AGG follows the array type that the planner gives its result, e.g. INT_ARRAY for DECIMAL(5, 0)
+        return name.equals(AggregationFunctionType.ARRAYAGG.name())
+            ? RelToPlanNodeConverter.convertToColumnDataType(aggCall.getType()).toDataType().name() : "BIG_DECIMAL";
       case CHAR:
       case VARCHAR:
         return "STRING";
@@ -207,6 +212,10 @@ public class PinotAggregateTypeArgumentRewriteRule extends RelOptRule {
         throw new IllegalArgumentException(
             String.format("Unsupported data type for %s%s: %s", name, signature, dataType.getSqlTypeName()));
     }
+  }
+
+  private static boolean isDistinctArrayAgg(AggregateCall aggCall) {
+    return aggCall.isDistinct() && isArrayAgg(aggCall);
   }
 
   private static boolean isArrayAgg(AggregateCall aggCall) {

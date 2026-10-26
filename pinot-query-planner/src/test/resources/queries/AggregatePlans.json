@@ -250,14 +250,14 @@
         ]
       },
       {
-        "description": "ARRAY_AGG(DISTINCT expression) without a data type passes DISTINCT as the isDistinct argument",
-        "sql": "EXPLAIN PLAN FOR SELECT a.col2, ARRAY_AGG(DISTINCT a.col3) FROM a GROUP BY a.col2",
+        "description": "ARRAY_AGG(DISTINCT ...) passes DISTINCT as a true isDistinct argument, with or without a data type",
+        "sql": "EXPLAIN PLAN FOR SELECT a.col2, ARRAY_AGG(DISTINCT a.col3), ARRAY_AGG(DISTINCT a.col3, false), ARRAY_AGG(DISTINCT a.col1, 'STRING') FROM a GROUP BY a.col2",
         "output": [
           "Execution Plan",
-          "\nPinotLogicalAggregate(group=[{0}], agg#0=[ARRAYAGG($1, _UTF-8'INT', true)], aggType=[FINAL])",
+          "\nPinotLogicalAggregate(group=[{0}], agg#0=[ARRAYAGG($1, _UTF-8'INT', true)], agg#1=[ARRAYAGG($2, _UTF-8'INT', true)], agg#2=[ARRAYAGG($3, _UTF-8'STRING', true)], aggType=[FINAL])",
           "\n  PinotLogicalExchange(distribution=[hash[0]])",
-          "\n    PinotLogicalAggregate(group=[{0}], agg#0=[ARRAYAGG($1, _UTF-8'INT', true)], aggType=[LEAF])",
-          "\n      LogicalProject($f0=[$1], $f1=[$2], $f2=[_UTF-8'INT'], $f3=[true])",
+          "\n    PinotLogicalAggregate(group=[{0}], agg#0=[ARRAYAGG($1, _UTF-8'INT', true)], agg#1=[ARRAYAGG($1, _UTF-8'INT', true)], agg#2=[ARRAYAGG($3, _UTF-8'STRING', true)], aggType=[LEAF])",
+          "\n      LogicalProject($f0=[$1], $f1=[$2], $f2=[false], $f3=[$0], $f4=[_UTF-8'STRING'], $f5=[_UTF-8'INT'], $f6=[true])",
           "\n        PinotLogicalTableScan(table=[[default, a]])",
           "\n"
         ]
