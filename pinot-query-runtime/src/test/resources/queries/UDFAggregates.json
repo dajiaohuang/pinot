@@ -326,6 +326,22 @@
         "outputs": [[[1, 2, 2, 3], 3]]
       },
       {
+        "sql": "SELECT arraySortInt(ARRAY_AGG(DISTINCT int_col)), CARDINALITY(ARRAY_AGG(DISTINCT string_col)) FROM {tbl}",
+        "outputs": [[[1, 2, 3], 2]]
+      },
+      {
+        "sql": "SELECT string_col, arraySortString(ARRAY_AGG(DISTINCT string_mv_col)) FROM {tbl} GROUP BY string_col",
+        "outputs": [["a", ["x", "y"]], ["b", ["x", "z"]]]
+      },
+      {
+        "sql": "SELECT CARDINALITY(ARRAY_AGG(long_col / ((int_col - 2) * 1.0))) FROM {tbl}",
+        "outputs": [[4]]
+      },
+      {
+        "sql": "SELECT CARDINALITY(ARRAY_AGG(CASE WHEN int_col > 1 THEN int_col END)), CARDINALITY(ARRAY_AGG(CASE WHEN int_col > 1 THEN int_col END, 'INT')) FROM {tbl}",
+        "outputs": [[3, 3]]
+      },
+      {
         "sql": "SELECT arraySortInt(ARRAY_AGG(int_col, 'INT')), arraySortInt(ARRAY_AGG(int_col, 'INT', true)) FROM {tbl}",
         "outputs": [[[1, 2, 2, 3], [1, 2, 3]]]
       }

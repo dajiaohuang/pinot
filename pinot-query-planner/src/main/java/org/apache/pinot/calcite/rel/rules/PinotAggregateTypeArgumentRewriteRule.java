@@ -100,6 +100,7 @@ public class PinotAggregateTypeArgumentRewriteRule extends RelOptRule {
     List<AggregateCall> orgAggCalls = aggRel.getAggCallList();
     List<AggregateCall> aggCalls = new ArrayList<>(orgAggCalls.size());
     Map<String, Integer> literalIndexByDataType = new HashMap<>();
+    int isDistinctLiteralIndex = -1;
     for (AggregateCall aggCall : orgAggCalls) {
       String dataType = getDataTypeArgument(aggCall, input);
       if (dataType == null) {
@@ -111,13 +112,23 @@ public class PinotAggregateTypeArgumentRewriteRule extends RelOptRule {
         return projects.size() - 1;
       });
       List<Integer> argList = new ArrayList<>(aggCall.getArgList());
+      AggregateCall newAggCall = aggCall;
       if (isArrayAgg(aggCall)) {
         argList.add(1, literalIndex);
+        // The aggregate exchange drops the DISTINCT flag, so ARRAY_AGG(DISTINCT expression) passes it as isDistinct
+        if (aggCall.isDistinct() && argList.size() == 2) {
+          if (isDistinctLiteralIndex < 0) {
+            projects.add(rexBuilder.makeLiteral(true));
+            isDistinctLiteralIndex = projects.size() - 1;
+          }
+          argList.add(isDistinctLiteralIndex);
+          newAggCall = aggCall.withDistinct(false);
+        }
       } else {
         argList.add(literalIndex);
       }
       // Keeps the original result type, so the rewrite does not change the result schema.
-      aggCalls.add(aggCall.withArgList(argList));
+      aggCalls.add(newAggCall.withArgList(argList));
     }
     RelNode newInput = LogicalProject.create(projectInput, hints, projects, (List<String>) null, Set.of());
     call.transformTo(
@@ -126,8 +137,8 @@ public class PinotAggregateTypeArgumentRewriteRule extends RelOptRule {
 
   /// Returns the data type argument to add, or `null` when the call already has one or is not such a call. Throws for
   /// a data argument without an explicit form, such as an array from a multi-value column in FIRST_WITH_TIME. The
-  /// mapped types match the single-stage `AggregateFunctionRewriteOptimizer`, except for an ARRAY_AGG of a DECIMAL with
-  /// scale 0, which only an expression can produce.
+  /// mapped types match the single-stage `AggregateFunctionRewriteOptimizer`, except that ARRAY_AGG of a DECIMAL
+  /// follows the array type that the planner gives it.
   @Nullable
   private static String getDataTypeArgument(AggregateCall aggCall, RelNode input) {
     List<Integer> argList = aggCall.getArgList();
@@ -171,11 +182,13 @@ public class PinotAggregateTypeArgumentRewriteRule extends RelOptRule {
       case DOUBLE:
         return "DOUBLE";
       case DECIMAL:
-        // The planner types an array of DECIMAL with scale 0 as INT_ARRAY or LONG_ARRAY, see
-        // RelToPlanNodeConverter.resolveDecimal
-        if (name.equals(AggregationFunctionType.ARRAYAGG.name()) && dataType.getScale() == 0
-            && dataType.getPrecision() <= 38) {
-          return dataType.getPrecision() <= 10 ? "INT" : "LONG";
+        if (name.equals(AggregationFunctionType.ARRAYAGG.name())) {
+          // The planner types an array of DECIMAL as INT_ARRAY or LONG_ARRAY for scale 0 and precision up to 38, and as
+          // DOUBLE_ARRAY otherwise, see RelToPlanNodeConverter.resolveDecimal
+          if (dataType.getScale() == 0 && dataType.getPrecision() <= 38) {
+            return dataType.getPrecision() <= 10 ? "INT" : "LONG";
+          }
+          return "DOUBLE";
         }
         return "BIG_DECIMAL";
       case CHAR:
