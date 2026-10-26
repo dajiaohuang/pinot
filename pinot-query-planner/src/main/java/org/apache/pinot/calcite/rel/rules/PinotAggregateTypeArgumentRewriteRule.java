@@ -19,6 +19,7 @@
 package org.apache.pinot.calcite.rel.rules;
 
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +40,8 @@ import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.tools.RelBuilderFactory;
+import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
+import org.apache.pinot.query.planner.logical.RelToPlanNodeConverter;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
 
 
@@ -55,6 +58,11 @@ import org.apache.pinot.segment.spi.AggregationFunctionType;
 /// an optimization: `QueryEnvironment` always applies [#WITHOUT_ANY_VALUE], or [#INSTANCE] when the `inferAnyValueType`
 /// query option is true, and `skipPlannerRules` cannot turn it off.
 public class PinotAggregateTypeArgumentRewriteRule extends RelOptRule {
+  private static final Set<ColumnDataType> ANY_VALUE_DATA_TYPES =
+      EnumSet.of(ColumnDataType.INT, ColumnDataType.LONG, ColumnDataType.FLOAT, ColumnDataType.DOUBLE,
+          ColumnDataType.BIG_DECIMAL, ColumnDataType.BOOLEAN, ColumnDataType.TIMESTAMP, ColumnDataType.STRING,
+          ColumnDataType.BYTES, ColumnDataType.UUID);
+
   public static final PinotAggregateTypeArgumentRewriteRule INSTANCE =
       new PinotAggregateTypeArgumentRewriteRule(true, PinotRuleUtils.PINOT_REL_FACTORY, null);
   /// Leaves ANY_VALUE without the data type argument.
@@ -134,29 +142,25 @@ public class PinotAggregateTypeArgumentRewriteRule extends RelOptRule {
   private String getDataTypeArgument(AggregateCall aggCall, RelNode input) {
     String name = AggregationFunctionType.getNormalizedAggregationFunctionName(aggCall.getAggregation().getName());
     List<Integer> argList = aggCall.getArgList();
-    String arguments;
     if (name.equals(AggregationFunctionType.FIRSTWITHTIME.name())
         || name.equals(AggregationFunctionType.LASTWITHTIME.name())) {
-      if (argList.size() != 2) {
-        return null;
-      }
-      arguments = "dataColumn, timeColumn";
-    } else if (name.equals(AggregationFunctionType.ANYVALUE.name())) {
+      return argList.size() == 2 ? getValueWithTimeDataType(name, getArgumentType(input, argList.get(0))) : null;
+    }
+    if (name.equals(AggregationFunctionType.ANYVALUE.name())) {
       if (argList.size() == 2) {
         checkAnyValueDataTypeArgument(name, argList, input);
         return null;
       }
-      if (!_rewriteAnyValue) {
-        return null;
-      }
-      arguments = "expr";
-    } else {
-      return null;
+      return _rewriteAnyValue ? getAnyValueDataType(name, getArgumentType(input, argList.get(0))) : null;
     }
-    return inferDataType(name, arguments, input.getRowType().getFieldList().get(argList.get(0)).getType());
+    return null;
   }
 
-  private static String inferDataType(String name, String arguments, RelDataType relDataType) {
+  private static RelDataType getArgumentType(RelNode input, int argIndex) {
+    return input.getRowType().getFieldList().get(argIndex).getType();
+  }
+
+  private static String getValueWithTimeDataType(String name, RelDataType relDataType) {
     SqlTypeName dataType = relDataType.getSqlTypeName();
     switch (dataType) {
       case TINYINT:
@@ -186,15 +190,26 @@ public class PinotAggregateTypeArgumentRewriteRule extends RelOptRule {
         return "UUID";
       default:
         throw new IllegalArgumentException(
-            String.format("Unsupported data type for %s(%s): %s", name, arguments, dataType));
+            String.format("Unsupported data type for %s(dataColumn, timeColumn): %s", name, dataType));
     }
+  }
+
+  /// Returns the type the multi-stage engine reads the argument as, e.g. DOUBLE for a DECIMAL expression with a scale,
+  /// so that the values are read without a conversion that can fail, such as an infinite DOUBLE to BIG_DECIMAL.
+  private static String getAnyValueDataType(String name, RelDataType relDataType) {
+    ColumnDataType dataType = RelToPlanNodeConverter.convertToColumnDataType(relDataType);
+    if (!ANY_VALUE_DATA_TYPES.contains(dataType)) {
+      throw new IllegalArgumentException(
+          String.format("Unsupported data type for %s(expr): %s", name, relDataType.getSqlTypeName()));
+    }
+    return dataType.name();
   }
 
   /// The result type of ANY_VALUE follows its data argument, so an explicit data type argument must be the one this
   /// rule supplies for it.
   private static void checkAnyValueDataTypeArgument(String name, List<Integer> argList, RelNode input) {
-    RelDataType relDataType = input.getRowType().getFieldList().get(argList.get(0)).getType();
-    String dataType = inferDataType(name, "expr", relDataType);
+    RelDataType relDataType = getArgumentType(input, argList.get(0));
+    String dataType = getAnyValueDataType(name, relDataType);
     RelNode unboxedInput = PinotRuleUtils.unboxRel(input);
     RexNode dataTypeArgument =
         unboxedInput instanceof Project ? ((Project) unboxedInput).getProjects().get(argList.get(1)) : null;

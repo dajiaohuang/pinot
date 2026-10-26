@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.IntFunction;
 import javax.annotation.Nullable;
 import org.apache.pinot.common.CustomObject;
 import org.apache.pinot.common.request.context.ExpressionContext;
@@ -171,7 +172,14 @@ public class AnyValueAggregationFunction extends BaseSingleInputAggregationFunct
     }
     BlockValSet bvs = blockValSetMap.get(_expression);
     ensureResultType(bvs);
-    aggregateHelper(length, bvs, (i, value) -> {
+    aggregateHelper(length, bvs, (i, values) -> {
+      if (holder.getResult() != null) {
+        return true;
+      }
+      Object value = values.apply(i);
+      if (value == null) {
+        return false;
+      }
       holder.setValue(value);
       return true; // Stop after first value found
     });
@@ -182,10 +190,13 @@ public class AnyValueAggregationFunction extends BaseSingleInputAggregationFunct
                                  Map<ExpressionContext, BlockValSet> map) {
     BlockValSet bvs = map.get(_expression);
     ensureResultType(bvs);
-    aggregateHelper(length, bvs, (i, value) -> {
+    aggregateHelper(length, bvs, (i, values) -> {
       int g = groupKeys[i];
       if (holder.getResult(g) == null) {
-        holder.setValueForKey(g, value);
+        Object value = values.apply(i);
+        if (value != null) {
+          holder.setValueForKey(g, value);
+        }
       }
       return false; // Continue processing for other groups
     });
@@ -196,10 +207,16 @@ public class AnyValueAggregationFunction extends BaseSingleInputAggregationFunct
                                  Map<ExpressionContext, BlockValSet> map) {
     BlockValSet bvs = map.get(_expression);
     ensureResultType(bvs);
-    aggregateHelper(length, bvs, (i, value) -> {
-      int[] keys = groupKeysArray[i];
-      for (int g : keys) {
+    aggregateHelper(length, bvs, (i, values) -> {
+      Object value = null;
+      for (int g : groupKeysArray[i]) {
         if (holder.getResult(g) == null) {
+          if (value == null) {
+            value = values.apply(i);
+            if (value == null) {
+              break;
+            }
+          }
           holder.setValueForKey(g, value);
         }
       }
@@ -225,78 +242,81 @@ public class AnyValueAggregationFunction extends BaseSingleInputAggregationFunct
   }
 
   @FunctionalInterface
-  private interface ValueProcessor<T> {
-    boolean process(int index, T value); // Returns true to stop processing, false to continue
+  private interface ValueProcessor {
+    /// Returns true to stop processing, false to continue. `values` reads the value of a row, so that a row is read
+    /// only when it is needed.
+    boolean process(int index, IntFunction<Object> values);
   }
 
   /// Generic helper for processing values with dictionary optimization for all supported data types
-  private void aggregateHelper(int length, BlockValSet bvs, ValueProcessor<Object> processor) {
+  private void aggregateHelper(int length, BlockValSet bvs, ValueProcessor processor) {
     // Reading through the bound type keeps values consistent when segments store the column as different types
     DataType storedType = _dataType != null ? _dataType.getStoredType() : bvs.getValueType().getStoredType();
+    IntFunction<Object> values = getValueReader(bvs, storedType);
+    forEachNotNull(length, bvs, (from, to) -> {
+      for (int i = from; i < to; i++) {
+        if (processor.process(i, values)) {
+          break;
+        }
+      }
+    });
+  }
+
+  /// Returns a reader of the values in the block. The values are fetched once per block, because some block value sets
+  /// build the value array on each call.
+  private static IntFunction<Object> getValueReader(BlockValSet bvs, DataType storedType) {
     // Use dictionary-based access for efficiency when available
     if (bvs.isDictionaryEncoded()) {
-      final int[] dictIds = bvs.getDictionaryIdsSV();
-      final Dictionary dict = bvs.getDictionary();
-      forEachNotNull(length, bvs, (from, to) -> {
-        for (int i = from; i < to; i++) {
-          Object value = getDictionaryValue(dict, dictIds[i], storedType);
-          if (processor.process(i, value)) {
-            break;
-          }
-        }
-      });
-    } else {
-      // Fall back to direct value access based on type
-      forEachNotNull(length, bvs, (from, to) -> {
-        for (int i = from; i < to; i++) {
-          Object value = getDirectValue(bvs, i, storedType);
-          if (value != null && processor.process(i, value)) {
-            break;
-          }
-        }
-      });
+      int[] dictIds = bvs.getDictionaryIdsSV();
+      Dictionary dictionary = bvs.getDictionary();
+      switch (storedType) {
+        case INT:
+          return i -> dictionary.getIntValue(dictIds[i]);
+        case LONG:
+          return i -> dictionary.getLongValue(dictIds[i]);
+        case FLOAT:
+          return i -> dictionary.getFloatValue(dictIds[i]);
+        case DOUBLE:
+          return i -> dictionary.getDoubleValue(dictIds[i]);
+        case STRING:
+          return i -> dictionary.getStringValue(dictIds[i]);
+        case BIG_DECIMAL:
+          return i -> dictionary.getBigDecimalValue(dictIds[i]);
+        case BYTES:
+          return i -> dictionary.getByteArrayValue(dictIds[i]);
+        default:
+          throw new IllegalStateException("Unsupported dictionary type: " + storedType);
+      }
     }
-  }
-
-  /// Get value from dictionary based on data type
-  private Object getDictionaryValue(Dictionary dict, int dictId, DataType storedType) {
     switch (storedType) {
-      case INT:
-        return dict.getIntValue(dictId);
-      case LONG:
-        return dict.getLongValue(dictId);
-      case FLOAT:
-        return dict.getFloatValue(dictId);
-      case DOUBLE:
-        return dict.getDoubleValue(dictId);
-      case STRING:
-        return dict.getStringValue(dictId);
-      case BIG_DECIMAL:
-        return dict.getBigDecimalValue(dictId);
-      case BYTES:
-        return dict.getByteArrayValue(dictId);
-      default:
-        throw new IllegalStateException("Unsupported dictionary type: " + storedType);
-    }
-  }
-
-  /// Get value directly from BlockValSet based on data type
-  private Object getDirectValue(BlockValSet bvs, int index, DataType storedType) {
-    switch (storedType) {
-      case INT:
-        return bvs.getIntValuesSV()[index];
-      case LONG:
-        return bvs.getLongValuesSV()[index];
-      case FLOAT:
-        return bvs.getFloatValuesSV()[index];
-      case DOUBLE:
-        return bvs.getDoubleValuesSV()[index];
-      case STRING:
-        return bvs.getStringValuesSV()[index];
-      case BIG_DECIMAL:
-        return bvs.getBigDecimalValuesSV()[index];
-      case BYTES:
-        return new ByteArray(bvs.getBytesValuesSV()[index]);
+      case INT: {
+        int[] values = bvs.getIntValuesSV();
+        return i -> values[i];
+      }
+      case LONG: {
+        long[] values = bvs.getLongValuesSV();
+        return i -> values[i];
+      }
+      case FLOAT: {
+        float[] values = bvs.getFloatValuesSV();
+        return i -> values[i];
+      }
+      case DOUBLE: {
+        double[] values = bvs.getDoubleValuesSV();
+        return i -> values[i];
+      }
+      case STRING: {
+        String[] values = bvs.getStringValuesSV();
+        return i -> values[i];
+      }
+      case BIG_DECIMAL: {
+        BigDecimal[] values = bvs.getBigDecimalValuesSV();
+        return i -> values[i];
+      }
+      case BYTES: {
+        byte[][] values = bvs.getBytesValuesSV();
+        return i -> new ByteArray(values[i]);
+      }
       default:
         throw new IllegalStateException("Unsupported direct access type: " + storedType);
     }

@@ -36,6 +36,8 @@ import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNull;
@@ -426,6 +428,20 @@ public class AnyValueAggregationFunctionTest extends AbstractAggregationFunction
     function.aggregateGroupBySV(1, new int[]{0}, groupHolder, values);
     assertEquals(function.extractGroupByResult(groupHolder, 0), 5L);
     assertEquals(function.getIntermediateResultColumnType(), ColumnDataType.LONG);
+  }
+
+  @Test
+  void testGroupByReadsValuesOncePerBlock() {
+    AnyValueAggregationFunction function = createFunction("LONG");
+    BlockValSet valueSet = mock(BlockValSet.class);
+    when(valueSet.getValueType()).thenReturn(DataType.LONG);
+    when(valueSet.getLongValuesSV()).thenReturn(new long[]{1L, 2L, 3L});
+    GroupByResultHolder holder = function.createGroupByResultHolder(2, 2);
+    function.aggregateGroupBySV(3, new int[]{0, 1, 0}, holder, Map.of(EXPRESSION, valueSet));
+    assertEquals(function.extractGroupByResult(holder, 0), 1L);
+    assertEquals(function.extractGroupByResult(holder, 1), 2L);
+    // Some block value sets build the value array on each call
+    verify(valueSet, times(1)).getLongValuesSV();
   }
 
   @Test

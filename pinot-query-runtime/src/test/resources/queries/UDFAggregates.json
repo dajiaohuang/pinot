@@ -212,6 +212,15 @@
       {
         "sql": "SET inferAnyValueType=true; SELECT /*+ aggOptions(is_skip_leaf_stage_aggregate='true') */ int_col, ANY_VALUE(decimal_col), ANY_VALUE(bytes_col), ANY_VALUE(uuid_col), ANY_VALUE(int_col * 1.5) FROM {tbl} GROUP BY int_col",
         "outputs": [[1, "1.5", "deadbeef", "123e4567-e89b-12d3-a456-426614174000", 1.5], [2, "2.5", "cafe", "123e4567-e89b-12d3-a456-426614174001", 3.0]]
+      },
+      {
+        "comment": "The infinite value of int_col = 1 is in the same block as the returned group",
+        "sql": "SET inferAnyValueType=true; SELECT int_col, ANY_VALUE(int_col / (int_col - 1.0)) FROM {tbl} GROUP BY int_col HAVING COUNT(*) = 1",
+        "outputs": [[2, 2.0]]
+      },
+      {
+        "sql": "SET inferAnyValueType=true; SELECT /*+ aggOptions(is_skip_leaf_stage_aggregate='true') */ int_col, ANY_VALUE(int_col / (int_col - 1.0)) FROM {tbl} GROUP BY int_col HAVING COUNT(*) = 1",
+        "outputs": [[2, 2.0]]
       }
     ]
   },

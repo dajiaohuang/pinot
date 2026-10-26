@@ -224,14 +224,14 @@
         ]
       },
       {
-        "description": "ANY_VALUE over a DECIMAL expression infers BIG_DECIMAL",
+        "description": "ANY_VALUE over a DECIMAL expression takes the type the expression is read as",
         "sql": "SET inferAnyValueType=true; EXPLAIN PLAN FOR SELECT ANY_VALUE(a.col3 * 1.5), ANY_VALUE(CAST(a.col3 AS DECIMAL(10, 0))) FROM a",
         "output": [
           "Execution Plan",
-          "\nPinotLogicalAggregate(group=[{}], agg#0=[ANYVALUE($0, _UTF-8'BIG_DECIMAL')], agg#1=[ANYVALUE($1, _UTF-8'BIG_DECIMAL')], aggType=[FINAL])",
+          "\nPinotLogicalAggregate(group=[{}], agg#0=[ANYVALUE($0, _UTF-8'DOUBLE')], agg#1=[ANYVALUE($1, _UTF-8'INT')], aggType=[FINAL])",
           "\n  PinotLogicalExchange(distribution=[hash])",
-          "\n    PinotLogicalAggregate(group=[{}], agg#0=[ANYVALUE($0, _UTF-8'BIG_DECIMAL')], agg#1=[ANYVALUE($1, _UTF-8'BIG_DECIMAL')], aggType=[LEAF])",
-          "\n      LogicalProject($f0=[*($2, 1.5:DECIMAL(2, 1))], $f1=[CAST($2):DECIMAL(10, 0) NOT NULL], $f2=[_UTF-8'BIG_DECIMAL'])",
+          "\n    PinotLogicalAggregate(group=[{}], agg#0=[ANYVALUE($0, _UTF-8'DOUBLE')], agg#1=[ANYVALUE($1, _UTF-8'INT')], aggType=[LEAF])",
+          "\n      LogicalProject($f0=[*($2, 1.5:DECIMAL(2, 1))], $f1=[CAST($2):DECIMAL(10, 0) NOT NULL], $f2=[_UTF-8'DOUBLE'], $f3=[_UTF-8'INT'])",
           "\n        PinotLogicalTableScan(table=[[default, a]])",
           "\n"
         ]
